@@ -9,20 +9,29 @@ def load_df(
     usecols: None | list = None,
 ) -> pd.DataFrame | None:
     try:
-        data: pd.DataFrame = pd.read_excel(
-            file_path, sheet_name, skiprows=skiprows, usecols=usecols
+        df = pd.read_excel(
+            file_path,
+            sheet_name=sheet_name,
+            skiprows=skiprows,
+            usecols=usecols,
+            dtype=str  # ensures consistent string cleaning
         )
+
         print(f"'{file_path}' loaded successfully...")
-        for col in data.select_dtypes(include="object").columns:
-            data[col] = data[col].str.strip()
-        data.columns = data.columns.str.strip()
-        data: pd.DataFrame = data.replace(r"^\s*$", np.nan, regex=True)
-        return data
+
+        # Strip whitespace from all string cells + column names in one pass
+        df = df.apply(lambda col: col.str.strip() if col.dtype == "object" else col)
+        df.columns = df.columns.str.strip()
+
+        # Replace empty strings or whitespace-only with NaN
+        df.replace(r"^\s*$", np.nan, regex=True, inplace=True)
+
+        return df
+
     except FileNotFoundError:
-        print(
-            f"Error: The specified file '{file_path}' was not found. Please check the file path."
-        )
+        print(f"Error: File '{file_path}' not found.")
         return None
+
     except Exception as e:
-        print(f"An unexpected error occurred while loading '{file_path}': {e}")
+        print(f"Unexpected error while loading '{file_path}': {e}")
         return None

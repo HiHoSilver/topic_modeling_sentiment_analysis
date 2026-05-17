@@ -2,6 +2,7 @@ from typing import Self
 import time
 import pandas as pd
 import numpy as np
+from transformers import AutoTokenizer
 from sentence_transformers import SentenceTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.cluster import KMeans
@@ -28,6 +29,10 @@ class TopicSentimentPipeline:
         n_top_terms=10,
     ):
         self.model = SentenceTransformer(embedding_model)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            "sentence-transformers/all-mpnet-base-v2"
+        )
+        self.tokenizer.model_max_length = 100000
         self.reducer = umap.UMAP(
             n_neighbors=n_neighbors,
             n_components=n_components,
@@ -52,9 +57,62 @@ class TopicSentimentPipeline:
         if isinstance(data, pd.DataFrame):
             return data[column].astype(str).tolist()
         return data
+  
+    def _chunk_text_token_aware(self, text, max_tokens=350, overlap=50):
+        """
+        Splits text into chunks based on tokenizer word-piece tokens.
+        Ensures no chunk exceeds the model's max token limit (512).
+        """
+        # Tokenize into word pieces
+        encoding = self.tokenizer(
+            text,
+            add_special_tokens=False,
+            return_attention_mask=False,
+            return_token_type_ids=False
+        )
+
+        input_ids = encoding["input_ids"]
+        chunks = []
+        start = 0
+
+        while start < len(input_ids):
+            end = start + max_tokens
+            chunk_ids = input_ids[start:end]
+
+            # Convert token IDs back to text
+            chunk_text = self.tokenizer.decode(chunk_ids, skip_special_tokens=True)
+            chunks.append(chunk_text)
+
+            start += max_tokens - overlap
+
+        return chunks
+
+    def _embed_chunks(self, text):
+        chunks = self._chunk_text_token_aware(text)
+
+        # Encode each chunk safely
+        chunk_embeddings = self.model.encode(
+            chunks,
+            show_progress_bar=False,
+            normalize_embeddings=True
+        )
+
+        # Mean pooling
+        return np.mean(chunk_embeddings, axis=0)
 
     def embed(self, docs):
-        return self.model.encode(docs, show_progress_bar=True)
+        embeddings = []
+        for doc in docs:
+            if not isinstance(doc, str) or len(doc.strip()) == 0:
+                embeddings.append(
+                    np.zeros(self.model.get_sentence_embedding_dimension())
+                )
+                continue
+
+            emb = self._embed_chunks(doc)
+            embeddings.append(emb)
+
+        return np.vstack(embeddings)
 
     def reduce(self, embeddings):
         return self.reducer.fit_transform(embeddings)
@@ -120,7 +178,14 @@ class TopicSentimentPipeline:
         }
 
     def transform(self, data, column=None, reassign_noise=False):
-        docs = self._extract_docs(data, column)
+        docs = pd.Series(self._extract_docs(data, column), dtype="string")
+
+        docs = (
+            docs
+            .str.normalize("NFKC")                    # normalize unicode
+            .str.replace(r"\s+", " ", regex=True)     # collapse whitespace
+            .str.strip()                              # trim edges
+        )
 
         embeddings = self.embed(docs)
         reduced = self.reduce(embeddings)
@@ -133,7 +198,7 @@ class TopicSentimentPipeline:
             df_temp = reassigner.reassign()
             raw_labels = df_temp["topic"].values
 
-        # Now renumber AFTER reassignment
+        # Renumber after reassignment
         labels = np.where(raw_labels == -1, -1, raw_labels + 1)
 
         sentiment = self.score_sentiment(docs)
@@ -147,11 +212,25 @@ class TopicSentimentPipeline:
             }
         )
 
+        # Word count
+        df["word_count"] = (
+            df["text"]
+            .fillna("")
+            .str.replace(r"\s+", " ", regex=True)
+            .str.strip()
+            .str.split()
+            .str.len()
+        )
+
+        # Token count
+        df["token_count"] = df["text"].apply(
+            lambda t: len(self.tokenizer.encode(t, add_special_tokens=True))
+        )
+        
         df["topic_keywords"] = df["topic"].apply(lambda t: topic_terms.get(t, []))
         df["topic_name"] = df["topic_keywords"].apply(
             lambda kws: ", ".join(kws[:3]) if kws else "Noise / Unassigned"
         )
-
         return df
 
 
@@ -191,7 +270,7 @@ class NoiseReassigner:
 
         # Assign each noise point to nearest real cluster centroid
         noise_to_cluster = []
-        for i, emb in enumerate(noise_embeddings):
+        for _, emb in enumerate(noise_embeddings):
             sims = cosine_similarity([emb], centroids).flatten()
             best_cluster_idx = sims.argmax()
             noise_to_cluster.append(real_topics[best_cluster_idx])
@@ -200,7 +279,6 @@ class NoiseReassigner:
         df.loc[noise_mask, "topic"] = pd.Series(
             noise_to_cluster, index=df.index[noise_mask]
         )
-
         return df
 
 
@@ -250,9 +328,7 @@ class RepresentativeResponseExtractor:
         non_noise_df = rep_df.loc[rep_df["topic"] > -1].sort_values("topic")
 
         sorted_df = pd.concat([non_noise_df, noise_df])
-
         sorted_df.to_excel(output_path, index=False)
-
         return self
 
 
@@ -335,7 +411,6 @@ class VisualizationGenerator:
         plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
         plt.tight_layout()
         plt.savefig(output_path, dpi=300)
-
         return self
 
     def umap_embedding_3d_plotly(
@@ -361,29 +436,40 @@ class VisualizationGenerator:
             }
         )
 
+        # Short preview for hover
+        df_plot["hover_short"] = df_plot["text"].str.slice(0, 200) + "..."
+
+        # Full text for click events
+        df_plot["full_text"] = df_plot["text"]
+
+        
         fig = px.scatter_3d(
             df_plot,
             x="x",
             y="y",
             z="z",
             color="topic_name",
-            hover_data={"text": True, "topic_name": True},
             opacity=0.85,
             title="3D UMAP Embedding of Responses by Topic",
             color_discrete_sequence=px.colors.qualitative.Set3,
         )
 
-        fig.update_traces(marker=dict(size=5))
+        # Attach full text + short text to each point
+        fig.update_traces(
+            customdata=df_plot[["hover_short", "full_text"]],
+            hovertemplate="%{customdata[0]}<extra></extra>",
+            marker=dict(size=5)
+        )
+
+
+
         fig.update_layout(legend=dict(x=1.05, y=1, bgcolor="rgba(255,255,255,0.7)"))
-
         fig.write_html(output_path)
-
         return self
 
 
 def main() -> None:
     start_time: float = time.perf_counter()
-
 
     # Load and shape data
     df = load_df(
@@ -392,7 +478,7 @@ def main() -> None:
             "Describe the greatest opportunities or challenges to creating flexible and affordable training programs (for technicians, practitioners, researchers, students, etc.) needed to build an inclusive, well-paid, domestic workforce in emerging technology careers. (maximum 600 words):"
         ],
     )
-    df = df.dropna(axis=0, how="any", subset=None, inplace=False)
+    df = df.dropna().drop_duplicates()
     df = df.rename(
         columns={
             "Describe the greatest opportunities or challenges to creating flexible and affordable training programs (for technicians, practitioners, researchers, students, etc.) needed to build an inclusive, well-paid, domestic workforce in emerging technology careers. (maximum 600 words):": "text"
@@ -401,22 +487,26 @@ def main() -> None:
 
     # 1. Run pipeline
     pipeline = TopicSentimentPipeline(
-        embedding_model="sentence-transformers/multi-qa-mpnet-base-dot-v1",
+        embedding_model="sentence-transformers/all-mpnet-base-v2",
         cluster_method="hdbscan",
         min_cluster_size=3,
-        cluster_selection_method="eom",
-        n_components=15,
-        n_neighbors=50,
+        cluster_selection_method="leaf",
+        n_components=10,
+        n_neighbors=10,
     )
 
+    print("Fitting data...")
     pipeline.fit(df, column="text")
+    print("Transforming data...")
     df_out = pipeline.transform(df, column="text", reassign_noise=True)
 
     # 2. Compute embeddings
+    print("Computing embeddings...")
     embeddings = pipeline.embed(df_out["text"].tolist())
 
-    # 3. Noise reassignment (NEW)
+    # 3. Noise reassignment
     reassigner = NoiseReassigner(df_out, embeddings)
+    print("Reassigning noise...")
     df_out = reassigner.reassign()
 
     # 4. Export corrected topic assignments to Excel
@@ -424,6 +514,7 @@ def main() -> None:
 
     # 5. Extract representative responses
     extractor = RepresentativeResponseExtractor(df_out, embeddings)
+    print("Getting representative responses...")
     reps = extractor.get_representative_responses(top_k=3)
     extractor.export_to_excel(reps, "representative_responses.xlsx")
 
@@ -432,7 +523,6 @@ def main() -> None:
     viz.topic_distribution().sentiment_distribution().umap_embedding(
         embeddings
     ).umap_embedding_3d_plotly(embeddings)
-
 
     end_time: float = time.perf_counter()
     elapsed_time: float = end_time - start_time
