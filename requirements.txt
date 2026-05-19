@@ -1,10 +1,12 @@
 pandas
 numpy
+transformers
 sentence-transformers
 scikit-learn
 hdbscan
 umap-learn
 nltk
+gensim
 matplotlib
 seaborn
 plotly
