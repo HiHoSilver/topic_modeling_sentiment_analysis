@@ -1,5 +1,3 @@
-# Note: currently only supports huggingface transformer models
-
 from typing import Self
 import time
 import pandas as pd
@@ -15,11 +13,12 @@ from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import matplotlib.pyplot as plt
 import seaborn as sns
 import plotly.express as px
+from config import DATA_CONFIG
 from io_utils import load_df
 from validation import Validator
 
 
-class TopicSentimentPipeline:
+class TopicModelingPipeline:
     def __init__(
         self,
         embedding_model="sentence-transformers/all-MiniLM-L6-v2",
@@ -134,21 +133,31 @@ class TopicSentimentPipeline:
         return self.clusterer.fit_predict(reduced)
 
     def extract_topic_terms(self, docs, labels):
+        # Build DataFrame
         df = pd.DataFrame({"doc": docs, "topic": labels})
         df = df[df.topic != -1].reset_index(drop=True)
 
         if df.empty:
             return {}
 
+        # Fit TF-IDF on all valid docs
         X = self.vectorizer.fit_transform(df["doc"])
         feature_names = np.array(self.vectorizer.get_feature_names_out())
 
         topic_terms = {}
+
+        # Compute top TF-IDF terms per topic
         for topic_id, group in df.groupby("topic"):
-            idx = group.index.to_list()
+            idx = group.index.to_numpy()
+
+            # Mean TF-IDF score for this topic
             tfidf_scores = X[idx].mean(axis=0).A1
+
+            # Top-N terms
             top_idx = np.argsort(tfidf_scores)[::-1][: self.n_top_terms]
-            topic_terms[topic_id] = feature_names[top_idx].tolist()
+            keywords = feature_names[top_idx].tolist()
+
+            topic_terms[topic_id] = keywords
 
         self.topic_terms_ = topic_terms
         return topic_terms
@@ -160,7 +169,7 @@ class TopicSentimentPipeline:
         df = pd.DataFrame({"topic": labels, "sentiment": sentiment})
         df = df[df.topic != -1]
         return df.groupby("topic")["sentiment"].mean().to_dict()
-    
+
     def _compute_noise_percentage(self, labels):
         labels = np.array(labels)
         total = len(labels)
@@ -199,10 +208,7 @@ class TopicSentimentPipeline:
         raw_labels = self.cluster(reduced)
 
         # Save raw labels BEFORE reassignment
-        df_raw = pd.DataFrame({
-            "text": docs,
-            "topic": raw_labels
-        })
+        df_raw = pd.DataFrame({"text": docs, "topic": raw_labels})
 
         noise_pct = self._compute_noise_percentage(raw_labels)
         print(f"Noise percentage: {noise_pct: .2f}")
@@ -332,7 +338,9 @@ class RepresentativeResponseExtractor:
 
         return self.reps
 
-    def export_to_excel(self, reps, output_path="representative_responses.xlsx"):
+    def export_to_excel(
+        self, reps, output_path="outputs/representative_responses.xlsx"
+    ):
         rows = []
 
         for topic, texts in reps.items():
@@ -372,7 +380,7 @@ class VisualizationGenerator:
         plt.xlabel("Number of Responses")
         plt.ylabel("Topic")
         plt.tight_layout()
-        plt.savefig("topic_distribution.png")
+        plt.savefig("outputs/topic_distribution.png")
         return self
 
     def sentiment_distribution(self) -> Self:
@@ -394,10 +402,12 @@ class VisualizationGenerator:
         plt.xlabel("Sentiment Score")
         plt.ylabel("Topic")
         plt.tight_layout()
-        plt.savefig("sentiment_distribution.png")
+        plt.savefig("outputs/sentiment_distribution.png")
         return self
 
-    def umap_embedding(self, embeddings, output_path="umap_embedding.png") -> Self:
+    def umap_embedding(
+        self, embeddings, output_path="outputs/umap_embedding.png"
+    ) -> Self:
         """
         Visualize the 2D UMAP embedding colored by topic.
         Requires: embeddings (2D array) from pipeline.embed()
@@ -438,7 +448,7 @@ class VisualizationGenerator:
         return self
 
     def umap_embedding_3d_plotly(
-        self, embeddings, output_path="umap_embedding_3d.html"
+        self, embeddings, output_path="outputs/umap_embedding_3d.html"
     ) -> Self:
         """
         Create an interactive 3D UMAP embedding plot using Plotly.
@@ -494,26 +504,20 @@ def main() -> None:
 
     # Load and shape data
     df = load_df(
-        "wfd_rfi.xlsx",
-        usecols=[
-            "Describe the greatest opportunities or challenges to creating flexible and affordable training programs (for technicians, practitioners, researchers, students, etc.) needed to build an inclusive, well-paid, domestic workforce in emerging technology careers. (maximum 600 words):"
-        ],
+        DATA_CONFIG.filename,
+        usecols=[DATA_CONFIG.usecol],
     )
     df = df.dropna().drop_duplicates()
-    df = df.rename(
-        columns={
-            "Describe the greatest opportunities or challenges to creating flexible and affordable training programs (for technicians, practitioners, researchers, students, etc.) needed to build an inclusive, well-paid, domestic workforce in emerging technology careers. (maximum 600 words):": "text"
-        }
-    )
+    df = df.rename(columns={DATA_CONFIG.usecol: "text"})
 
     # 1. Run pipeline
-    pipeline = TopicSentimentPipeline(
+    pipeline = TopicModelingPipeline(
         embedding_model="sentence-transformers/all-mpnet-base-v2",
         cluster_method="hdbscan",
-        min_cluster_size=4,     # Lowering the value lowers noise but also decreseas coherence
+        min_cluster_size=4,  # Lowering the value lowers noise but also decreseas coherence
         cluster_selection_method="leaf",
         n_components=10,
-        n_neighbors=20,         # Lowering the value slightly increases noise but slightly increases coherence
+        n_neighbors=20,  # Lowering the value slightly increases noise but slightly increases coherence
     )
 
     print("Fitting data...")
@@ -531,13 +535,13 @@ def main() -> None:
     df_out = reassigner.reassign()
 
     # 4. Export corrected topic assignments to Excel
-    df_out.to_excel("topic_analysis.xlsx", index=False)
+    df_out.to_excel("outputs/topic_analysis.xlsx", index=False)
 
     # 5. Extract representative responses
     extractor = RepresentativeResponseExtractor(df_out, embeddings)
     print("Getting representative responses...")
     reps = extractor.get_representative_responses(top_k=3)
-    extractor.export_to_excel(reps, "representative_responses.xlsx")
+    extractor.export_to_excel(reps, "outputs/representative_responses.xlsx")
 
     # 6. Visualizations
     viz = VisualizationGenerator(df_out)
