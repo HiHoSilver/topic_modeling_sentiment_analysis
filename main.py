@@ -49,6 +49,10 @@ class TopicModelingPipeline:
         self.vectorizer = TfidfVectorizer(
             stop_words="english", max_features=5000, ngram_range=(1, 2)
         )
+        self.keyword_extractor = KeywordExtractor(
+            embed_model=self.model, n_top_terms=n_top_terms
+        )
+
         self.sia = SentimentIntensityAnalyzer()
 
         self.topic_terms_ = {}
@@ -62,7 +66,7 @@ class TopicModelingPipeline:
     def _chunk_text_token_aware(self, text, max_tokens=350, overlap=50):
         """
         Splits text into chunks based on tokenizer word-piece tokens.
-        Ensures no chunk exceeds the model's max token limit (512).
+        Ensures no chunk exceeds the model's max token limit (384 for MPNet models).
         """
         # Tokenize into word pieces
         encoding = self.tokenizer(
@@ -132,35 +136,11 @@ class TopicModelingPipeline:
         )
         return self.clusterer.fit_predict(reduced)
 
-    def extract_topic_terms(self, docs, labels):
-        # Build DataFrame
-        df = pd.DataFrame({"doc": docs, "topic": labels})
-        df = df[df.topic != -1].reset_index(drop=True)
+    def extract_topic_terms(self, docs, labels, embeddings=None):
+        if embeddings is None:
+            embeddings = self.embed(docs)
 
-        if df.empty:
-            return {}
-
-        # Fit TF-IDF on all valid docs
-        X = self.vectorizer.fit_transform(df["doc"])
-        feature_names = np.array(self.vectorizer.get_feature_names_out())
-
-        topic_terms = {}
-
-        # Compute top TF-IDF terms per topic
-        for topic_id, group in df.groupby("topic"):
-            idx = group.index.to_numpy()
-
-            # Mean TF-IDF score for this topic
-            tfidf_scores = X[idx].mean(axis=0).A1
-
-            # Top-N terms
-            top_idx = np.argsort(tfidf_scores)[::-1][: self.n_top_terms]
-            keywords = feature_names[top_idx].tolist()
-
-            topic_terms[topic_id] = keywords
-
-        self.topic_terms_ = topic_terms
-        return topic_terms
+        return self.keyword_extractor.extract(docs, labels, embeddings)
 
     def score_sentiment(self, docs):
         return [self.sia.polarity_scores(d)["compound"] for d in docs]
@@ -183,7 +163,7 @@ class TopicModelingPipeline:
         embeddings = self.embed(docs)
         reduced = self.reduce(embeddings)
         labels = self.cluster(reduced)
-        topic_terms = self.extract_topic_terms(docs, labels)
+        topic_terms = self.extract_topic_terms(docs, labels, embeddings)
         sentiment = self.score_sentiment(docs)
         topic_sentiment = self.aggregate_sentiment(labels, sentiment)
 
@@ -224,7 +204,7 @@ class TopicModelingPipeline:
         labels = np.where(raw_labels == -1, -1, raw_labels + 1)
 
         sentiment = self.score_sentiment(docs)
-        topic_terms = self.extract_topic_terms(docs, labels)
+        topic_terms = self.extract_topic_terms(docs, labels, embeddings)
 
         df = pd.DataFrame(
             {
@@ -310,6 +290,45 @@ class NoiseReassigner:
             noise_to_cluster, index=df.index[noise_mask]
         )
         return df
+
+
+class KeywordExtractor:
+    def __init__(self, embed_model, n_top_terms=10):
+        self.embed_model = embed_model
+        self.n_top_terms = n_top_terms
+
+        self.vectorizer = TfidfVectorizer(
+            stop_words="english", ngram_range=(1, 2), max_features=5000
+        )
+
+    def extract(self, docs, labels, embeddings):
+        df = pd.DataFrame({"doc": docs, "topic": labels})
+        df = df[df.topic != -1]
+
+        topic_docs = df.groupby("topic")["doc"].apply(lambda x: " ".join(x))
+
+        X = self.vectorizer.fit_transform(topic_docs)
+        feature_names = np.array(self.vectorizer.get_feature_names_out())
+
+        topic_terms = {}
+
+        for topic_id, row in zip(topic_docs.index, X):
+            scores = row.toarray().ravel()
+            top_idx = scores.argsort()[::-1][: self.n_top_terms * 3]
+            keywords = feature_names[top_idx].tolist()
+
+            mask = df["topic"] == topic_id
+            topic_emb = embeddings[df.index[mask]]
+
+            centroid = topic_emb.mean(axis=0)
+
+            kw_emb = self.embed_model.encode(keywords)
+            sims = cosine_similarity([centroid], kw_emb)[0]
+            ranked = [kw for _, kw in sorted(zip(sims, keywords), reverse=True)]
+
+            topic_terms[topic_id] = ranked[: self.n_top_terms]
+
+        return topic_terms
 
 
 class RepresentativeResponseExtractor:

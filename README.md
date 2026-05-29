@@ -27,16 +27,17 @@ The pipeline produces:
 3. Dimensionality Reduction: Uses UMAP for dimensionality reduction.
 4. Clustering: Uses HDBSCAN to identify clusters in UMAP space.
 5. Noise Reassignment: Embeddings labeled as noise reassigned to nearest cluster centroid using Kmeans.
-6. Topic Keyword Extraction: Keywords are aggregated per topic using TF-IDF.
+6. Topic Keyword Extraction: Keywords are aggregated per topic using c-TF-IDF and semantic re-ranking.
 7. Sentiment Analysis: Generates sentiment analysis using NLTK Vader.
 8. Validation: Computes noise percentage, topic coherence, and cluster size distribution
 
 ## Model
 
-
+The pipeline is tuned for sentence-transformer/all-mpnet-base-v2, but can default to sentence-transformer/all-MiniLM-L6-v2 if no model parameter is provided. 
 
 ## Chuck-Aware Embedding
 
+Since the token limit for mpnet models is limited to 256, the pipeline will automatically chuck documents longer than 350 and overlap the embeddings by 50 tokens to preserve semantic continutity. As such, text that exceeds the max context window can still be processed by the pipeline. If a non-npnet model is used, the `max_tokens` parameter may need to be adjusted.
 
 ## Parameters
 
@@ -57,18 +58,6 @@ The most important configuration parameters are:
 
 ## Requirements
 
-Requires the following properly-formatted files to run:
-```
-pd3po.xlsx
-nsf_award_search.xlsx
-baa.xlsx
-team_data.xlsx
-CARegionMappingData.xlsx
-AUTH.py
-```
-
 Install the required libraries:
 
 	pip install -r requirements.txt
-
-Contact codeowners to obtain required files/formats.
