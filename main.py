@@ -136,11 +136,22 @@ class TopicModelingPipeline:
         )
         return self.clusterer.fit_predict(reduced)
 
-    def extract_topic_terms(self, docs, labels, embeddings=None):
+    def extract_topic_terms(self, docs, raw_labels, embeddings=None):
+        """
+        Extract topic keywords using the upgraded KeywordExtractor.
+        IMPORTANT: raw_labels must be the ORIGINAL HDBSCAN labels,
+        not the renumbered ones used for output.
+        """
         if embeddings is None:
             embeddings = self.embed(docs)
 
-        return self.keyword_extractor.extract(docs, labels, embeddings)
+        topic_terms = self.keyword_extractor.extract(docs, raw_labels, embeddings)
+
+        # Save for downstream visualizations
+        self.topic_terms_ = topic_terms
+
+        return topic_terms
+
 
     def score_sentiment(self, docs):
         return [self.sia.polarity_scores(d)["compound"] for d in docs]
@@ -204,7 +215,13 @@ class TopicModelingPipeline:
         labels = np.where(raw_labels == -1, -1, raw_labels + 1)
 
         sentiment = self.score_sentiment(docs)
-        topic_terms = self.extract_topic_terms(docs, labels, embeddings)
+        
+        # Extract keywords using RAW labels
+        topic_terms = self.extract_topic_terms(docs, raw_labels, embeddings)
+
+        # THEN renumber labels for output
+        labels = np.where(raw_labels == -1, -1, raw_labels + 1)
+
 
         df = pd.DataFrame(
             {
@@ -517,6 +534,152 @@ class VisualizationGenerator:
         fig.write_html(output_path)
         return self
 
+    def topic_similarity_matrix(
+        self, embeddings, output_path="outputs/topic_similarity_matrix.png"
+    ):
+        df = self.df.copy()
+
+        # Compute centroids
+        centroids = {}
+        for topic in df["topic"].unique():
+            mask = df["topic"] == topic
+            centroids[topic] = embeddings[mask].mean(axis=0)
+
+        # Build similarity matrix
+        topics = sorted(centroids.keys())
+        matrix = np.zeros((len(topics), len(topics)))
+
+        for i, ti in enumerate(topics):
+            for j, tj in enumerate(topics):
+                matrix[i, j] = cosine_similarity([centroids[ti]], [centroids[tj]])[0][0]
+
+        # Plot heatmap
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(
+            matrix,
+            xticklabels=topics,
+            yticklabels=topics,
+            cmap="viridis",
+            annot=True,
+            fmt=".2f",
+        )
+        plt.title("Topic Similarity Matrix (Cosine Similarity)")
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=300)
+        return self
+
+    def topic_embedding_density(
+        self, embeddings, output_path="outputs/topic_density.png"
+    ):
+        reducer = umap.UMAP(
+            n_neighbors=30, n_components=2, metric="cosine", random_state=42
+        )
+        emb_2d = reducer.fit_transform(embeddings)
+
+        df_plot = pd.DataFrame(
+            {
+                "x": emb_2d[:, 0],
+                "y": emb_2d[:, 1],
+                "topic": self.df["topic"],
+                "topic_name": self.df["topic_name"],
+            }
+        )
+
+        plt.figure(figsize=(12, 10))
+        sns.kdeplot(
+            data=df_plot,
+            x="x",
+            y="y",
+            hue="topic_name",
+            fill=True,
+            alpha=0.4,
+            thresh=0.05,
+            levels=20,
+        )
+
+        plt.title("Topic Embedding Density Plot")
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=300)
+        return self
+
+    def umap_cluster_confidence(
+        self, embeddings, clusterer, output_path="outputs/umap_confidence.png"
+    ):
+        reducer = umap.UMAP(
+            n_neighbors=30, n_components=2, metric="cosine", random_state=42
+        )
+        emb_2d = reducer.fit_transform(embeddings)
+
+        df_plot = pd.DataFrame(
+            {
+                "x": emb_2d[:, 0],
+                "y": emb_2d[:, 1],
+                "topic": self.df["topic"],
+                "confidence": clusterer.probabilities_,
+            }
+        )
+
+        plt.figure(figsize=(10, 8))
+        sns.scatterplot(
+            data=df_plot,
+            x="x",
+            y="y",
+            hue="confidence",
+            palette="viridis",
+            s=40,
+            alpha=0.9,
+        )
+
+        plt.title("UMAP Cluster Confidence (HDBSCAN Probabilities)")
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=300)
+        return self
+
+    def topic_keyword_overlap_matrix(self, topic_terms, output_path="outputs/topic_keyword_overlap.png"):
+        # Filter out topics with no keywords
+        topic_terms = {t: kws for t, kws in topic_terms.items() if len(kws) > 0}
+
+        if len(topic_terms) == 0:
+            print("No topics have keywords — skipping keyword overlap matrix.")
+            return self
+
+        topics = sorted(topic_terms.keys())
+        n = len(topics)
+
+        matrix = np.zeros((n, n))
+
+        for i, ti in enumerate(topics):
+            set_i = set(topic_terms[ti])
+            for j, tj in enumerate(topics):
+                set_j = set(topic_terms[tj])
+
+                # Safe Jaccard similarity
+                union = set_i | set_j
+                if len(union) == 0:
+                    matrix[i, j] = 0.0
+                else:
+                    matrix[i, j] = len(set_i & set_j) / len(union)
+
+        # If matrix is all zeros, seaborn will fail — handle gracefully
+        if np.all(matrix == 0):
+            print("Keyword overlap matrix is all zeros — no overlaps to visualize.")
+            return self
+
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(
+            matrix,
+            xticklabels=topics,
+            yticklabels=topics,
+            cmap="magma_r",
+            annot=True,
+            fmt=".2f"
+        )
+
+        plt.title("Topic Keyword Overlap (Jaccard Similarity)")
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=300)
+        return self
+
 
 def main() -> None:
     start_time: float = time.perf_counter()
@@ -566,7 +729,15 @@ def main() -> None:
     viz = VisualizationGenerator(df_out)
     viz.topic_distribution().sentiment_distribution().umap_embedding(
         embeddings
-    ).umap_embedding_3d_plotly(embeddings)
+    ).umap_embedding_3d_plotly(embeddings).topic_similarity_matrix(
+        embeddings
+    ).topic_embedding_density(
+        embeddings
+    ).umap_cluster_confidence(
+        embeddings, pipeline.clusterer
+    ).topic_keyword_overlap_matrix(
+        pipeline.topic_terms_
+    )
 
     end_time: float = time.perf_counter()
     elapsed_time: float = end_time - start_time
