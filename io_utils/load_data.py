@@ -14,7 +14,7 @@ def load_df(
             sheet_name=sheet_name,
             skiprows=skiprows,
             usecols=usecols,
-            dtype=str  # ensures consistent string cleaning
+            dtype=str,  # ensures consistent string cleaning
         )
 
         print(f"'{file_path}' loaded successfully...")

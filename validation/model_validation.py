@@ -22,12 +22,7 @@ class Validator:
     # ---------------------------------------------------------
     def _prepare_corpus(self):
         docs_tokens = (
-            self.df["text"]
-            .fillna("")
-            .astype(str)
-            .str.lower()
-            .str.split()
-            .tolist()
+            self.df["text"].fillna("").astype(str).str.lower().str.split().tolist()
         )
         dictionary = Dictionary(docs_tokens)
         return docs_tokens, dictionary

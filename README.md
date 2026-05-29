@@ -10,7 +10,7 @@ This tool provides topic‑modeling pipeline designed for short-form text, such 
 - HDBSCAN for density‑based clustering
 - Noise reassignment to recover meaningful topics
 - Sentiment analysis for emotional context
-- A dedicated Validation module for model quality assessment
+- Validation analysis for model quality assessment
 
 The pipeline produces:
 - Topic assignments
@@ -19,6 +19,7 @@ The pipeline produces:
 - Sentiment scores
 - Word/token counts
 - Full validation metrics
+- Vizualizations of model outputs
  
 ## Pipeline Architecture 
 
@@ -30,6 +31,7 @@ The pipeline produces:
 6. Topic Keyword Extraction: Keywords are aggregated per topic using c-TF-IDF and semantic re-ranking.
 7. Sentiment Analysis: Generates sentiment analysis using NLTK Vader.
 8. Validation: Computes noise percentage, topic coherence, and cluster size distribution
+9. Vizualization: Produces vizualizations to assess topic density and distribution, topic similarity and keyword overlap, and umap embedding and confidence.
 
 ## Model
 
