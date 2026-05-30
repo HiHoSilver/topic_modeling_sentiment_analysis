@@ -25,6 +25,7 @@ class VisualizationGenerator:
         plt.ylabel("Topic")
         plt.tight_layout()
         plt.savefig("outputs/topic_distribution.png")
+        plt.close()
         return self
 
     def sentiment_distribution(self) -> Self:
@@ -47,6 +48,7 @@ class VisualizationGenerator:
         plt.ylabel("Topic")
         plt.tight_layout()
         plt.savefig("outputs/sentiment_distribution.png")
+        plt.close()
         return self
 
     def umap_embedding(
@@ -89,6 +91,7 @@ class VisualizationGenerator:
         plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
         plt.tight_layout()
         plt.savefig(output_path, dpi=300)
+        plt.close()
         return self
 
     def umap_embedding_3d_plotly(
@@ -140,6 +143,7 @@ class VisualizationGenerator:
 
         fig.update_layout(legend=dict(x=1.05, y=1, bgcolor="rgba(255,255,255,0.7)"))
         fig.write_html(output_path)
+        plt.close()
         return self
 
     def topic_similarity_matrix(
@@ -174,6 +178,7 @@ class VisualizationGenerator:
         plt.title("Topic Similarity Matrix (Cosine Similarity)")
         plt.tight_layout()
         plt.savefig(output_path, dpi=300)
+        plt.close()
         return self
 
     def topic_embedding_density(
@@ -208,24 +213,51 @@ class VisualizationGenerator:
         plt.title("Topic Embedding Density Plot")
         plt.tight_layout()
         plt.savefig(output_path, dpi=300)
+        plt.close()
         return self
+    
+    @staticmethod
+    def _compute_centroid_confidence(embeddings, labels):
+        """
+        Compute continuous confidence scores based on cosine similarity
+        between each point and its cluster centroid.
+        """
+        unique_topics = [t for t in np.unique(labels) if t != -1]
+        centroids = {t: embeddings[labels == t].mean(axis=0) for t in unique_topics}
+
+        confidence = np.zeros(len(labels))
+        for t in unique_topics:
+            mask = labels == t
+            sims = cosine_similarity(
+                embeddings[mask],
+                centroids[t].reshape(1, -1)
+            ).flatten()
+            confidence[mask] = sims
+
+        # Noise points remain 0.0
+        return confidence
+
 
     def umap_cluster_confidence(
-        self, embeddings, clusterer, output_path="outputs/umap_confidence.png"
+        self, embeddings, labels, output_path="outputs/umap_confidence.png"
     ):
+        """
+        Visualize cluster confidence using centroid similarity scores.
+        """
         reducer = umap.UMAP(
             n_neighbors=30, n_components=2, metric="cosine", random_state=42
         )
         emb_2d = reducer.fit_transform(embeddings)
 
-        df_plot = pd.DataFrame(
-            {
-                "x": emb_2d[:, 0],
-                "y": emb_2d[:, 1],
-                "topic": self.df["topic"],
-                "confidence": clusterer.probabilities_,
-            }
-        )
+        # Compute continuous confidence
+        confidence = self._compute_centroid_confidence(embeddings, labels)
+
+        df_plot = pd.DataFrame({
+            "x": emb_2d[:, 0],
+            "y": emb_2d[:, 1],
+            "topic": self.df["topic"],
+            "confidence": confidence,
+        })
 
         plt.figure(figsize=(10, 8))
         sns.scatterplot(
@@ -238,9 +270,10 @@ class VisualizationGenerator:
             alpha=0.9,
         )
 
-        plt.title("UMAP Cluster Confidence (HDBSCAN Probabilities)")
+        plt.title("UMAP Cluster Confidence (Centroid Similarity)")
         plt.tight_layout()
         plt.savefig(output_path, dpi=300)
+        plt.close()
         return self
 
     def topic_keyword_overlap_matrix(
@@ -288,4 +321,5 @@ class VisualizationGenerator:
         plt.title("Topic Keyword Overlap (Jaccard Similarity)")
         plt.tight_layout()
         plt.savefig(output_path, dpi=300)
+        plt.close()
         return self

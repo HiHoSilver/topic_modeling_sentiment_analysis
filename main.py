@@ -165,6 +165,20 @@ class TopicModelingPipeline:
         noise_count = np.sum(labels == -1)
         return noise_count / total
 
+    @staticmethod
+    def _summarize_cluster_confidence(embeddings, labels):
+        unique_topics = [t for t in np.unique(labels) if t != -1]
+        centroids = {t: embeddings[labels == t].mean(axis=0) for t in unique_topics}
+
+        summary = {}
+        for t in unique_topics:
+            sims = cosine_similarity(
+                embeddings[labels == t], centroids[t].reshape(1, -1)
+            )
+            summary[t] = float(np.mean(sims))
+
+        return summary
+
     def fit(self, data, column=None):
         docs = self._extract_docs(data, column)
         embeddings = self.embed(docs)
@@ -191,32 +205,39 @@ class TopicModelingPipeline:
         )
 
         embeddings = self.embed(docs)
+        self.embeddings_ = embeddings
         reduced = self.reduce(embeddings)
         raw_labels = self.cluster(reduced)
-
-        # Save raw labels BEFORE reassignment
-        df_raw = pd.DataFrame({"text": docs, "topic": raw_labels})
 
         noise_pct = self._compute_noise_percentage(raw_labels)
         print(f"Noise percentage: {noise_pct: .2f}")
 
         # Optional noise reassignment BEFORE renumbering
         if reassign_noise:
-            df_temp = pd.DataFrame({"topic": raw_labels})
-            reassigner = NoiseReassigner(df_temp, embeddings)
-            df_temp = reassigner.reassign()
-            raw_labels = df_temp["topic"].values
+            nr = NoiseReassigner(threshold=0.40, verbose=True)
+            raw_labels = nr.reassign(embeddings, raw_labels)
 
-        # Renumber after reassignment
-        labels = np.where(raw_labels == -1, -1, raw_labels + 1)
+        # Compute cluster confidence on RAW labels
+        cluster_conf = self._summarize_cluster_confidence(embeddings, raw_labels)
 
-        sentiment = self.score_sentiment(docs)
+        # Remap to final labels
+        self.cluster_confidence_ = {t + 1: v for t, v in cluster_conf.items()}
+
+        print("Cluster confidence:", cluster_conf)
 
         # Extract keywords using RAW labels
-        topic_terms = self.extract_topic_terms(docs, raw_labels, embeddings)
+        topic_terms_raw = self.extract_topic_terms(docs, raw_labels, embeddings)
 
-        # THEN renumber labels for output
+        # Renumber labels for output
         labels = np.where(raw_labels == -1, -1, raw_labels + 1)
+
+        # Remap keyword dictionary to final labels
+        topic_terms = {(t + 1): kws for t, kws in topic_terms_raw.items()}
+
+        # Store final topic terms for visualizations
+        self.topic_terms_ = topic_terms
+
+        sentiment = self.score_sentiment(docs)
 
         df = pd.DataFrame(
             {
@@ -257,51 +278,56 @@ class TopicModelingPipeline:
 
 
 class NoiseReassigner:
-    def __init__(self, df, embeddings):
-        self.df = df
-        self.embeddings = embeddings
+    """
+    Nearest-Centroid noise reassignment with cosine similarity threshold.
+    Keeps points as noise if similarity < threshold.
+    """
 
-    def reassign(self):
-        df = self.df.copy()
-        embeddings = self.embeddings
+    def __init__(self, threshold=0.30, verbose=True):
+        self.threshold = threshold
+        self.verbose = verbose
 
-        # Identify noise points
-        noise_mask = df["topic"].astype(int) == -1
-        noise_embeddings = embeddings[noise_mask]
+    def reassign(self, embeddings, labels):
+        labels = labels.copy()
+        noise_mask = labels == -1
 
-        # If no noise, return original df
-        if len(noise_embeddings) == 0:
-            return df
+        if noise_mask.sum() == 0:
+            if self.verbose:
+                print("No noise points detected — skipping reassignment.")
+            return labels
 
-        # Identify real clusters
-        real_topics = df[df["topic"] != -1]["topic"].unique()
-        real_topics.sort()
+        # Compute centroids for each real topic
+        unique_topics = [t for t in np.unique(labels) if t != -1]
+        centroids = {t: embeddings[labels == t].mean(axis=0) for t in unique_topics}
 
-        # Compute centroids of real clusters
-        centroids = []
-        for topic in real_topics:
-            topic_mask = df["topic"] == topic
-            topic_embeddings = embeddings[topic_mask]
-            centroids.append(topic_embeddings.mean(axis=0))
+        centroid_matrix = np.vstack([centroids[t] for t in unique_topics])
 
-        centroids = np.vstack(centroids)
+        # Cosine similarity of noise → centroids
+        sims = cosine_similarity(embeddings[noise_mask], centroid_matrix)
+        best_idx = sims.argmax(axis=1)
+        best_scores = sims.max(axis=1)
 
-        # Run KMeans on noise points with k = number of real clusters
-        kmeans = KMeans(n_clusters=len(real_topics), random_state=42, n_init="auto")
-        kmeans.fit(noise_embeddings)
+        noise_indices = np.where(noise_mask)[0]
+        reassigned = labels.copy()
 
-        # Assign each noise point to nearest real cluster centroid
-        noise_to_cluster = []
-        for _, emb in enumerate(noise_embeddings):
-            sims = cosine_similarity([emb], centroids).flatten()
-            best_cluster_idx = sims.argmax()
-            noise_to_cluster.append(real_topics[best_cluster_idx])
+        kept_as_noise = 0
+        reassigned_count = 0
 
-        # Update df
-        df.loc[noise_mask, "topic"] = pd.Series(
-            noise_to_cluster, index=df.index[noise_mask]
-        )
-        return df
+        for i, idx in enumerate(noise_indices):
+            if best_scores[i] >= self.threshold:
+                reassigned[idx] = unique_topics[best_idx[i]]
+                reassigned_count += 1
+            else:
+                reassigned[idx] = -1
+                kept_as_noise += 1
+
+        if self.verbose:
+            print(f"Noise reassignment complete:")
+            print(f"  Reassigned: {reassigned_count}")
+            print(f"  Kept as noise: {kept_as_noise}")
+            print(f"  Threshold: {self.threshold}")
+
+        return reassigned
 
 
 class KeywordExtractor:
@@ -395,6 +421,47 @@ class RepresentativeResponseExtractor:
         return self
 
 
+def build_topic_summary(df, topic_terms, cluster_confidence):
+    """
+    Build a topic-level summary table with:
+    - topic ID
+    - topic name
+    - number of documents
+    - average sentiment
+    - cluster confidence
+    - top keywords
+    """
+
+    # Filter out noise for summary
+    df_non_noise = df[df["topic"] != -1]
+
+    summary = (
+        df_non_noise.groupby("topic")
+        .agg(
+            n_docs=("text", "count"),
+            avg_sentiment=("sentiment", "mean"),
+        )
+        .reset_index()
+    )
+
+    # Add topic names
+    summary["topic_name"] = summary["topic"].apply(
+        lambda t: df_non_noise[df_non_noise["topic"] == t]["topic_name"].iloc[0]
+    )
+
+    # Add cluster confidence
+    summary["cluster_confidence"] = summary["topic"].apply(
+        lambda t: cluster_confidence.get(t, 0.0)
+    )
+
+    # Add top keywords
+    summary["top_keywords"] = summary["topic"].apply(
+        lambda t: ", ".join(topic_terms.get(t, [])[:10])
+    )
+
+    return summary
+
+
 def main() -> None:
     start_time: float = time.perf_counter()
 
@@ -420,26 +487,25 @@ def main() -> None:
     pipeline.fit(df, column="text")
     print("Transforming data...")
     df_out = pipeline.transform(df, column="text", reassign_noise=True)
+    embeddings = pipeline.embeddings_
 
-    # 2. Compute embeddings
-    print("Computing embeddings...")
-    embeddings = pipeline.embed(df_out["text"].tolist())
-
-    # 3. Noise reassignment
-    reassigner = NoiseReassigner(df_out, embeddings)
-    print("Reassigning noise...")
-    df_out = reassigner.reassign()
-
-    # 4. Export corrected topic assignments to Excel
+    # 2. Export topic assignments to Excel
     df_out.to_excel("outputs/topic_analysis.xlsx", index=False)
 
-    # 5. Extract representative responses
+    # 3. Generate topic summary and export to Excel
+    summary = build_topic_summary(
+        df_out, pipeline.topic_terms_, pipeline.cluster_confidence_
+    )
+
+    summary.to_excel("outputs/topic_summary.xlsx", index=False)
+
+    # 4. Extract representative responses
     extractor = RepresentativeResponseExtractor(df_out, embeddings)
     print("Getting representative responses...")
     reps = extractor.get_representative_responses(top_k=3)
     extractor.export_to_excel(reps, "outputs/representative_responses.xlsx")
 
-    # 6. Visualizations
+    # 5. Visualizations
     viz = VisualizationGenerator(df_out)
     viz.topic_distribution().sentiment_distribution().umap_embedding(
         embeddings
@@ -448,7 +514,7 @@ def main() -> None:
     ).topic_embedding_density(
         embeddings
     ).umap_cluster_confidence(
-        embeddings, pipeline.clusterer
+        embeddings, df_out["topic"].values
     ).topic_keyword_overlap_matrix(
         pipeline.topic_terms_
     )
