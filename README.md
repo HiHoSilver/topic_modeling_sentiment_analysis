@@ -27,10 +27,10 @@ The pipeline produces:
 2. Embedding: Users sentence-transformer models to develop embeddings
 3. Dimensionality Reduction: Uses UMAP for dimensionality reduction.
 4. Clustering: Uses HDBSCAN to identify clusters in UMAP space.
-5. Noise Reassignment: Embeddings labeled as noise reassigned to nearest cluster centroid using Kmeans.
+5. Noise Reassignment: Embeddings labeled as noise reassigned to Nearest-Centroid noise reassignment with cosine similarity threshold.
 6. Topic Keyword Extraction: Keywords are aggregated per topic using c-TF-IDF and semantic re-ranking.
 7. Sentiment Analysis: Generates sentiment analysis using NLTK Vader.
-8. Validation: Computes noise percentage, topic coherence, and cluster size distribution
+8. Validation: Computes noise percentage, mean topic coherence, cluster size distribution, reassignment percentage, and cluster confidence.
 9. Vizualization: Produces vizualizations to assess topic density and distribution, topic similarity and keyword overlap, and umap embedding and confidence.
 
 ## Model

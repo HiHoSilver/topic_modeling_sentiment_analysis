@@ -470,6 +470,9 @@ def main() -> None:
         DATA_CONFIG.filename,
         usecols=[DATA_CONFIG.usecol],
     )
+    if df is None or df.empty:
+        raise ValueError("Error loading data")
+    
     df = df.dropna().drop_duplicates()
     df = df.rename(columns={DATA_CONFIG.usecol: "text"})
 
